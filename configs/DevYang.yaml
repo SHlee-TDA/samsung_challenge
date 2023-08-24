@@ -1,0 +1,50 @@
+DESCRIPTION: 'Reduced batch size to 512. Disabled multiple GPU'
+DATASET:
+  NAME: bengali_kaggle
+  AUGMENTATION:
+    BLURRING_PROB: 0.25
+    BRIGHTNESS_CONTRAST_PROB: 1
+    GAUSS_NOISE_PROB: 0.25
+    GRID_DISTORTION_PROB: 1
+    ROTATION_DEGREE: 20
+    ROTATION_PROB: 1
+  CONCENTRATE_CROP: true
+  BATCH_SIZE: 32
+  CPU_NUM: 1
+  NORMALIZE_MEAN:
+  - 0.485
+  - 0.456
+  - 0.406
+  NORMALIZE_STD:
+  - 0.229
+  - 0.224
+  - 0.225
+  TO_RGB: true
+  RESIZE_SHAPE:
+  - 128
+  - 128
+  FOCUS_CLASS: []
+MODEL:
+  PARALLEL: false
+  META_ARCHITECTURE: baseline
+  NORMALIZATION_FN: BN
+  BACKBONE:
+    NAME: mobilenet_v2
+    RGB: true
+  HEAD:
+    NAME: simple_head
+    ACTIVATION: leaky_relu
+    BN: true
+    DROPOUT: -1
+    HIDDEN_DIMS:
+    - 512
+    - 256
+    INPUT_DIM: 1280
+  SOLVER:
+    TOTAL_EPOCHS: 40
+    OPTIMIZER: adam
+    BASE_LR: 0.001
+    AMP: false
+    LOSS:
+      NAME: xentropy
+      OHEM_RATE: 1.0
