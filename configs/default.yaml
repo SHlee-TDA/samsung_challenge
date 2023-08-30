@@ -1,8 +1,8 @@
 DESCRIPTION: default config
 DATASET:
   NAME: SAMSUNG AI Challenge
-  TRAIN_DATA_PATH: C:\Users\master\Desktop\Projects\samsung-computer-vision-competition\data\raw\train_source_image
-  VAL_DATA_PATH: C:/Users/nasty/data-science/kaggle/bengali/data/interim/valid_data.p
+  TRAIN_DATA_PATH: 
+  VAL_DATA_PATH: 
   USE_FOLDS_DATA: False
   VALIDATION_FOLD: 4
   FOLDS_PATH: ""
