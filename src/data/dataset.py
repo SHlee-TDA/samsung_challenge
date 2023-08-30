@@ -14,7 +14,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from src.data.preprocess import base_transform
 
-
+PATH = '../data/raw'
 class SourceDataset(Dataset):
     """
     Torch data set object for the source domain data
@@ -25,26 +25,27 @@ class SourceDataset(Dataset):
         :param node_cfg_dataset: the DATASET node of the config
         :param is_training: choose 
         """
-        self.data = pd.read_csv(csv_file)   # meta data
+        self.csv_file = os.path.join(PATH, csv_file)
+        self.data = pd.read_csv(self.csv_file)   # meta data
         self.transform = transform          # preprocessing
-        self.infer = is_training
+        self.is_training = is_training
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        img_path = self.data.iloc[idx, 1]
+        img_path = os.path.join(PATH,self.data.iloc[idx, 1])
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
         # Inference mode에서는 transform된 이미지를 출력
-        if self.infer:
+        if not self.is_training:
             if self.transform:
                 image = self.transform(image=image)['image']
             return image
         
 
-        mask_path = self.data.iloc[idx, 2]
+        mask_path = os.path.join(PATH, self.data.iloc[idx, 2])
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         mask[mask == 255] = 12 #배경을 픽셀값 12로 간주
 
@@ -54,7 +55,7 @@ class SourceDataset(Dataset):
             image = augmented['image']
             mask = augmented['mask']
 
-        return image, mask
+            return image, mask
     
 
 class TargetDataset(Dataset):
@@ -67,15 +68,16 @@ class TargetDataset(Dataset):
         :param node_cfg_dataset: the DATASET node of the config
         :param is_training: choose 
         """
-        self.data = pd.read_csv(csv_file)   # meta data
+        self.csv_file = os.path.join(PATH, csv_file)
+        self.data = pd.read_csv(self.csv_file)   # meta data
         self.transform = transform          # preprocessing
-        self.infer = is_training
+        self.infer = not is_training
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        img_path = self.data.iloc[idx, 1]
+        img_path = os.path.join(PATH,self.data.iloc[idx, 1])
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
@@ -96,6 +98,6 @@ class TargetDataset(Dataset):
             image = augmented['image']
             mask = augmented['mask']
 
-        return image, mask
+            return image, mask
     
     
