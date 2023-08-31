@@ -98,6 +98,6 @@ class TargetDataset(Dataset):
             image = augmented['image']
             mask = augmented['mask']
 
-            return image, mask
+        return image, mask
     
     
