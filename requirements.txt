@@ -30,3 +30,4 @@ opencv-python
 sklearn
 albumentations
 tqdm
+pynvml
