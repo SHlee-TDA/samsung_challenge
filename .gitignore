@@ -110,3 +110,5 @@ models/mobilenet_v2-b0353104.pth
 /depends/wheelhouse
 submission.csv
 /depends/wheelhouse/
+
+notebooks/best_model.pth
