@@ -74,22 +74,22 @@ class DeepLabV3(nn.Module):
         if backbone == 'mobilenet':
             model_func = deeplabv3_mobilenet_v3_large
             weights = DeepLabV3_MobileNet_V3_Large_Weights.COCO_WITH_VOC_LABELS_V1 if pretrained else None
-            weights_backbone = MobileNet_V3_Large_Weights
+            weights_backbone = MobileNet_V3_Large_Weights.DEFAULT
         elif backbone == 'resnet50':
             model_func = deeplabv3_resnet50
             weights = DeepLabV3_ResNet50_Weights.COCO_WITH_VOC_LABELS_V1 if pretrained else None
-            weights_backbone = ResNet50_Weights
+            weights_backbone = ResNet50_Weights.DEFAULT
         else:
             model_func = deeplabv3_resnet101
             weights = DeepLabV3_ResNet101_Weights.COCO_WITH_VOC_LABELS_V1 if pretrained else None
-            weights_backbone = ResNet101_Weights
+            weights_backbone = ResNet101_Weights.DEFAULT
         
         
         self.model = model_func(weights=weights, weights_backbone=weights_backbone)
         
         # Update the classifier layers for custom number of classes
         self.model.classifier[4] = nn.Conv2d(256, NUMBER_OF_CLASSES, kernel_size=(1, 1), stride=(1, 1))
-        self.model.aux_classifier[4] = nn.Conv2d(256, NUMBER_OF_CLASSES, kernel_size=(1, 1), stride=(1, 1))
+        self.model.aux_classifier[4] = nn.Conv2d(10, NUMBER_OF_CLASSES, kernel_size=(1, 1), stride=(1, 1))
 
         # Set all layers to non-trainable by default
         for param in self.model.parameters():
@@ -110,6 +110,12 @@ class DeepLabV3(nn.Module):
             for param in self.model.aux_classifier[4].parameters():
                 param.requires_grad = True
 
+    def freeze_bn(self):
+        """Freezes the Batch Normalization layers."""
+        for layer in self.model.modules():
+            if isinstance(layer, nn.BatchNorm2d):
+                layer.eval()
+    
     def forward(self, x):
         """
         Forward pass of the DeepLabV3 model.
@@ -121,6 +127,7 @@ class DeepLabV3(nn.Module):
         - OrderedDict: Contains two keys - 'out' for the primary output and 'aux' for the auxiliary output.
         """
         return self.model(x)
+
 
 class FCN(nn.Module):
     """
@@ -162,11 +169,11 @@ class FCN(nn.Module):
         if backbone == 'resnet50':
             model_func = fcn_resnet50
             weights = FCN_ResNet50_Weights.COCO_WITH_VOC_LABELS_V1 if pretrained else None
-            weights_backbone = ResNet50_Weights
+            weights_backbone = ResNet50_Weights.DEFAULT
         else:
             model_func = fcn_resnet101
             weights = FCN_ResNet101_Weights.COCO_WITH_VOC_LABELS_V1 if pretrained else None
-            weights_backbone = ResNet101_Weights
+            weights_backbone = ResNet101_Weights.DEFAULT
         
         
         self.model = model_func(weights=weights, weights_backbone=weights_backbone)
@@ -194,6 +201,12 @@ class FCN(nn.Module):
             for param in self.model.aux_classifier[4].parameters():
                 param.requires_grad = True
 
+    def freeze_bn(self):
+        """Freezes the Batch Normalization layers."""
+        for layer in self.model.modules():
+            if isinstance(layer, nn.BatchNorm2d):
+                layer.eval()
+    
     def forward(self, x):
         """
         Forward pass of the DeepLabV3 model.
@@ -245,7 +258,7 @@ class LRASPP(nn.Module):
         if backbone == 'mobilenet':
             model_func = lraspp_mobilenet_v3_large
             weights = LRASPP_MobileNet_V3_Large_Weights.COCO_WITH_VOC_LABELS_V1 if pretrained else None
-            weights_backbone = MobileNet_V3_Large_Weights
+            weights_backbone = MobileNet_V3_Large_Weights.DEFAULT
         
         self.model = model_func(weights=weights, weights_backbone=weights_backbone)
         
@@ -271,6 +284,12 @@ class LRASPP(nn.Module):
                 param.requires_grad = True
             for param in self.model.classifier.high_classifier.parameters():
                 param.requires_grad = True
+
+    def freeze_bn(self):
+        """Freezes the Batch Normalization layers."""
+        for layer in self.model.modules():
+            if isinstance(layer, nn.BatchNorm2d):
+                layer.eval()
 
     def forward(self, x):
         """

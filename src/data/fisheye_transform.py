@@ -107,7 +107,7 @@ def fisheye_circular_transform_torch(image: torch.Tensor,
     r_fisheye = f_scaled * torch.atan(r / f_scaled)
     x_fisheye = (w // 2 + r_fisheye * torch.cos(theta)).long()
     y_fisheye = (h // 2 + r_fisheye * torch.sin(theta)).long()
-    valid_coords = (x_fisheye >= 0) & (x_fisheye < w) & (y_fisheye >= 0) & (y_fisheye < h)
+    valid_coords = (x_fisheye >= 0) & (x_fisheye < w) & (y_fisheye >= 0) & (y_fisheye < h) & (r < w // 2) # 렌즈 모양 없는 문제 발견, mask backgroud 0→12로 변경 필요
     new_image = torch.zeros_like(image)
     if mask is not None:
         new_mask = torch.zeros_like(mask)
@@ -117,6 +117,7 @@ def fisheye_circular_transform_torch(image: torch.Tensor,
     if mask is not None:
         new_mask[:, valid_coords] = mask[:, y_fisheye[valid_coords], x_fisheye[valid_coords]]
     return new_image, new_mask
+
 
 class FisheyeTransform(ImageOnlyTransform):
     def __init__(self, 
