@@ -28,7 +28,7 @@ class SourceDataset(Dataset):
     """
     Torch Dataset for the source domain data which includes images and their respective masks.
     """
-    def __init__(self, csv_file: str, transform: Optional[A.Compose] = base_transform, is_training: bool = True):
+    def __init__(self, csv_file: str, transform: Optional[A.Compose], is_training: bool = True):
         """
         Initializes the SourceDataset.
 

@@ -18,7 +18,7 @@ from typing import Tuple, Optional, Union
 import torch
 import numpy as np
 import albumentations as A
-from albumentations.core.transforms_interface import ImageOnlyTransform
+from albumentations.core.transforms_interface import DualTransform
 
 
 
@@ -79,7 +79,7 @@ def fisheye_circular_transform(image: np.ndarray,
     return new_image
 
 
-def fisheye_circular_transform_torch(image: torch.Tensor, 
+def fisheye_circular_transform_torch(image: Optional[torch.Tensor] = None, 
                                      mask: Optional[torch.Tensor] = None, 
                                      fov_degree: float = 200, 
                                      focal_scale: float = 4.5) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -96,8 +96,18 @@ def fisheye_circular_transform_torch(image: torch.Tensor,
     - new_image (torch.Tensor): Transformed image with fisheye effect.
     - new_mask (torch.Tensor or None): Transformed mask with fisheye effect or None if no mask is provided.
     """
-    _, h, w = image.shape
-    radian_conversion = torch.tensor(np.pi/180, dtype=image.dtype, device=image.device)
+    # Check if both image and mask are None
+    if image is None and mask is None:
+        raise ValueError("Both image and mask cannot be None. Provide at least one input.")
+    
+
+    _, h, w = (image if image is not None else mask).shape
+    
+
+
+
+    
+    radian_conversion = torch.tensor(np.pi/180, dtype=(image if image is not None else mask).dtype, device=(image if image is not None else mask).device)
     f = w / (2 * torch.tan(0.5 * fov_degree * radian_conversion))
     f_scaled = f * focal_scale
     x = torch.linspace(-w//2, w//2, w).repeat(h, 1)
@@ -108,18 +118,27 @@ def fisheye_circular_transform_torch(image: torch.Tensor,
     x_fisheye = (w // 2 + r_fisheye * torch.cos(theta)).long()
     y_fisheye = (h // 2 + r_fisheye * torch.sin(theta)).long()
     valid_coords = (x_fisheye >= 0) & (x_fisheye < w) & (y_fisheye >= 0) & (y_fisheye < h) & (r < w // 2) # 렌즈 모양 없는 문제 발견, mask backgroud 0→12로 변경 필요
-    new_image = torch.zeros_like(image)
+
+    # Define the outside of the circle
+    outside_circle = r >= w // 2
+
+    new_image = None
+    new_mask = None
+
+    if image is not None:
+        new_image = torch.zeros_like(image)
+        new_image[:, valid_coords] = image[:, y_fisheye[valid_coords], x_fisheye[valid_coords]]
+    
     if mask is not None:
         new_mask = torch.zeros_like(mask)
-    else:
-        new_mask = None
-    new_image[:, valid_coords] = image[:, y_fisheye[valid_coords], x_fisheye[valid_coords]]
-    if mask is not None:
         new_mask[:, valid_coords] = mask[:, y_fisheye[valid_coords], x_fisheye[valid_coords]]
+        new_mask[:, outside_circle] = 12
+
+
     return new_image, new_mask
 
 
-class FisheyeTransform(ImageOnlyTransform):
+class FisheyeTransform(DualTransform):
     def __init__(self, 
                  fov_degree: float = 200, 
                  focal_scale: float = 4.5, 
@@ -149,7 +168,7 @@ class FisheyeTransform(ImageOnlyTransform):
         - Transformed image with fisheye effect.
         """
         image_tensor = torch.tensor(image).permute(2, 0, 1).float()
-        transformed_image, _ = fisheye_circular_transform_torch(image_tensor, fov_degree=self.fov_degree, focal_scale=self.focal_scale)
+        transformed_image, _ = fisheye_circular_transform_torch(image=image_tensor, mask=None, fov_degree=self.fov_degree, focal_scale=self.focal_scale)
         return transformed_image.permute(1, 2, 0).byte().numpy()
 
     def apply_to_mask(self, mask: Union[np.ndarray, torch.Tensor], **params) -> Union[np.ndarray, torch.Tensor]:
@@ -163,5 +182,5 @@ class FisheyeTransform(ImageOnlyTransform):
         - Transformed mask with fisheye effect.
         """
         mask_tensor = torch.tensor(mask).unsqueeze(0).float()
-        _, transformed_mask = fisheye_circular_transform_torch(mask_tensor, fov_degree=self.fov_degree, focal_scale=self.focal_scale)
+        _, transformed_mask = fisheye_circular_transform_torch(image=None, mask=mask_tensor, fov_degree=self.fov_degree, focal_scale=self.focal_scale)
         return transformed_mask.squeeze(0).byte().numpy()
