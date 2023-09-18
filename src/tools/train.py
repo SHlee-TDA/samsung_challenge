@@ -1,386 +1,305 @@
-"""
-
-train model
-Usage:
-    train.py -path_output=<path> [--path_cfg_data=<path>]  [--path_cfg_override=<path>]
-    train.py -h | --help
-
-Options:
-    -h --help               show this screen help
-    -path_output=<path>               output path
-    --path_cfg_data=<path>       data config path [default: configs/data.yaml]
-    --path_cfg_override=<path>            training config path
-"""
-
+from typing import Optional, Union
+import datetime
 import os
-import time
-import pickle
 import torch
-import numpy as np
-from docopt import docopt
-#from apex import amp
-from src.modeling.meta_arch.build import build_model
-from src.data.bengali_data import build_data_loader
-from src.modeling.solver import build_optimizer, build_scheduler, build_evaluator, MixupAugmenter
-
-from yacs.config import CfgNode
-from src.config import get_cfg_defaults, combine_cfgs
-
-# For Tensorboard integration
-from torch.utils.tensorboard import SummaryWriter
+import torch.nn.functional as F
+from torch.optim import Adam, SGD, AdamW
+from torch.optim.lr_scheduler import StepLR, ExponentialLR, OneCycleLR
+from tqdm import tqdm
+from src.tools.metrics import compute_mIoU
+from src.visualization.plotting import monitor_training_process
 
 
-def train(cfg, debug=False):
-    
-    #############################
-    # Pre-training 
-    #############################
-
-    # PATHS
-    assert cfg.OUTPUT_PATH != ''
-    output_path = cfg.OUTPUT_PATH
-    train_path = cfg.DATASET.TRAIN_DATA_PATH
-    val_path = cfg.DATASET.VAL_DATA_PATH
-
-    # sample is 1/4th of the train images - aka 1 .parquet file
-    train_path_sample = cfg.DATASET.TRAIN_DATA_SAMPLE
-    valid_path_sample = cfg.DATASET.VALID_DATA_SAMPLE
-
-    # Create writable timestamp for easier record keeping
-    timestamp = datetime.now().isoformat(sep="T", timespec="auto")
-    name_timestamp = timestamp.replace(":", "_")
-
-    # Make output dir and its parents if they do not exist
-    if not os.path.exists(output_path):
-        os.mkdir(output_path)
-
-    # Make backup folders if they do not exist
-    backup_dir = os.path.join(output_path, 'model_backups')
-    if not os.path.exists(backup_dir):
-        os.mkdir(backup_dir)
-
-    # Make result folders if they do not exist 
-    results_dir = os.path.join(output_path, 'results')
-    if not os.path.exists(results_dir):
-        os.mkdir(results_dir)
-
-    # to initialize Tensorboard
-    writer_tensorboard = SummaryWriter(log_dir=results_dir + "logs_tensorflow")
-
-    # Save configs
-    cfg.dump(stream=open(os.path.join(results_dir, f'config_{name_timestamp}.yaml'), 'w'))
-    
-    # File path to store the state of the model
-    state_fpath = os.path.join(output_path, 'model.pt')
-
-    # Performance path where we'll save our metrics to trace.p
-    perf_path = os.path.join(results_dir, 'trace.p')
-    perf_trace = []
-
-    # debug: load a smaller training file
-    if debug:
-        train_data = pickle.load(open(train_path_sample, 'rb'))
-        val_data = pickle.load(open(valid_path_sample, 'rb'))
-
-    # Folds
-    if cfg.DATASET.USE_FOLDS_DATA:
-        data_path = cfg.DATASET.FOLDS_PATH
-        all_data_folds = pickle.load(open(data_path, 'rb'))
-        val_fold = cfg.DATASET.VALIDATION_FOLD
-        train_data = []
-        val_data = []
-        for idx, entries in enumerate(all_data_folds):
-            if idx == val_fold:
-                val_data = entries
-            else:
-                train_data = train_data + entries
-    else:
-        train_data = pickle.load(open(train_path, 'rb'))
-        val_data = pickle.load(open(val_path, 'rb'))
-
-    # witchcraft: only train on few classes
-    focus_cls = cfg.DATASET.FOCUS_CLASS
-    if len(focus_cls) > 0:
-        train_data = [x for x in train_data if x[1][0] in focus_cls]
-        val_data = [x for x in val_data if x[1][0] in focus_cls]
-
-    # DataLoader
-    train_loader = build_data_loader(train_data, cfg.DATASET, True)
-    val_loader = build_data_loader(val_data, cfg.DATASET, False)
-
-    # Build model using config dict node
-    model = build_model(cfg.MODEL)
-
-    # Solver evaluator
-    solver_cfg = cfg.MODEL.SOLVER
-
-    # Epochs
-    total_epochs = solver_cfg.TOTAL_EPOCHS
-
-    # Loss function
-    loss_fn = solver_cfg.LOSS.NAME
-
-    # for weighted focal loss, initialize last layer bias weights as constant
-    if loss_fn == 'weighted_focal_loss':
-        last_layer = model.head.fc_layers[-1]
-        for m in last_layer.modules():
-            if isinstance(m, torch.nn.Linear):
-                torch.nn.init.constant_(m.bias, -3.0)
-
-    current_epoch = 0
-
-    # MultiGPU training
-    multi_gpu_training = cfg.MULTI_GPU_TRAINING
-    if cfg.RESUME_PATH != "":
-        checkpoint = torch.load(cfg.RESUME_PATH, map_location='cpu')
-        current_epoch = checkpoint['epoch']
-        model.load_state_dict(checkpoint["model_state"])
-    if multi_gpu_training:
-        model = torch.nn.DataParallel(model)
-    _ = model.cuda()
-
-    # Optimizer, scheduler, amp
-    opti_cfg = solver_cfg.OPTIMIZER
-    optimizer = build_optimizer(model, opti_cfg)
-    use_amp = solver_cfg.AMP
-
-    # ------ Uncomment if we use apex library --------
-    # if use_amp:
-    #     opt_level = 'O1'
-    #     model, optimizer = amp.initialize(model, optimizer, opt_level=opt_level)
-
-    # Resume training with correct optimizer and scheduler
-    if cfg.RESUME_PATH != "":
-        if 'optimizer_state' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state'])
-        if 'scheduler_state' in checkpoint and scheduler is not None:
-            scheduler.load_state_dict(checkpoint['scheduler_state'])
 
 
-        # ------ Uncomment if we use apex library --------
-        # if use_amp and 'amp_state' in checkpoint:
-        #     amp.load_state_dict(checkpoint['amp_state'])
 
-    # Build Scheduler
-    scheduler_cfg = solver_cfg.SCHEDULER
-    scheduler_type = scheduler_cfg.NAME
-    scheduler = build_scheduler(optimizer, scheduler_cfg)
 
-    # Build evaluator with or without Mixup
-    mixup_training = solver_cfg.MIXUP_AUGMENT
-    if mixup_training:
-        mixup_augmenter = MixupAugmenter(solver_cfg.MIXUP)
+class TrainingConfig:
+    """
+    A configuration and utility class for training a DANN model.
+    """
 
-    evaluator, mixup_evaluator = build_evaluator(solver_cfg)
-    evaluator.float().cuda()
-    if mixup_evaluator is not None:
-        mixup_evaluator.float().cuda()
+    def __init__(self,
+                 model: torch.nn.Module,
+                 learning_rate: float = 0.001,
+                 epochs: int = 1000,
+                 batch_size: int = 32,
+                 weight_decay: float = 0,
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu",
+                 verbose: bool = True,
+                 print_every: int = 10,
+                 criterion: torch.nn.Module = nn.CrossEntropyLoss(),
+                 optimizer_choice: str = 'Adam',
+                 scheduler_choice: Optional[str] = None,
+                 optimizer_params: Optional[dict] = None,
+                 scheduler_params: Optional[dict] = None,
+                 early_stopping_patience: int = 10,
+                freeze_bn: bool = True
+):
+        """
+        Initialize the training configuration.
 
-    ##########################################
-    # Main training epoch loop starts here   
-    ##########################################
+        Args:
+            model (torch.nn.Module): The model to be trained.
+            learning_rate (float, optional): Learning rate for the optimizer. Default is 0.001.
+            epochs (int, optional): Number of epochs for training. Default is 1000.
+            batch_size (int, optional): Batch size for the dataloaders. Default is 32.
+            weight_decay (float, optional): Weight decay for the optimizer. Default is 0.
+            device (str, optional): Device for training ("cuda" or "cpu"). Default is "cuda" if available, otherwise "cpu".
+            verbose (bool, optional): Whether to print training progress. Default is True.
+            print_every (int, optional): How often to print training progress. Default is 10.
+            optimizer_choice (str, optional): Choice of optimizer ("Adam" or "SGD"). Default is "Adam".
+            scheduler_choice (str, optional): Choice of learning rate scheduler. Default is None.
+            optimizer_params (dict, optional): Additional parameters for the optimizer. Default is None.
+            scheduler_params (dict, optional): Additional parameters for the scheduler. Default is None.
+            early_stopping_patience (int, optional): Number of epochs to wait before early stopping. Default is 10.
+        """
+        # if torch.cuda.device_count() > 1:
+        #     print(f"Using {torch.cuda.device_count()} GPUs!")
+        #     model = nn.DataParallel(model)
+        #     multi_gpu_train = True
+        # elif torch.cuda.device_count() == 1:
+        #     print(f"Using only 1 GPU!")
+        #     model.to(device)
+        #     multi_gpu_train = False
+        # else:
+        #     print(f"Using CPU")
+        #     model.to(device)
+        #     multi_gpu_train = False
+            
+        self.model = model
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.weight_decay = weight_decay
+        self.device = device
+        self.verbose = verbose
+        self.print_every = print_every
+        self.criterion = criterion
+        self.optimizer_choice = optimizer_choice
+        self.scheduler_choice = scheduler_choice
+        self.optimizer_params = optimizer_params or {}
+        self.scheduler_params = scheduler_params or {}
+        self.early_stopping_patience = early_stopping_patience
+        self.freeze_bn = freeze_bn
+        if self.freeze_bn:
+            self.model.freeze_bn()
 
-    s_time = time.time()
-    parameters = list(model.parameters())
-    for epoch in range(current_epoch, total_epochs):
+        # Set the checkpoint directory
+        self.model_name = type(model).__name__
+        self.start_time = datetime.datetime.now().strftime('%y%m%d_%H%M')
+        self.checkpoint_dir = os.path.join(self.start_time + '_' + self.model_name)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"best_model_{self.start_time}.pth")
+
+    def train_DANN(self, source_dataloader, target_dataloader, val_dataloader=None, save_checkpoint_every=None):
+            """
+            Train a DANN model using the provided data and configuration.
+
+            Args:
+                source_dataloader (DataLoader): DataLoader for the source domain data.
+                target_dataloader (DataLoader): DataLoader for the target domain data.
+                val_dataloader (DataLoader, optional): DataLoader for validation data.
+                save_checkpoint_every (int, optional): Epoch interval to save checkpoints. If None, checkpoints are not saved.
+
+            Returns:
+                nn.Module: Trained DANN model.
+            """
+
+
+
+            source_iter = iter(source_dataloader)
+            target_iter = iter(target_dataloader)
+            
+            #optimizer = self._initialize_optimizer(self.model.parameters())
+            optimizer = torch.optim.Adam(self.model.parameters(), self.learning_rate)
+            # Learning Rate Scheduler Initialization (if provided)
+            scheduler = None
+            if self.scheduler_choice is not None:
+                scheduler = self._initialize_scheduler(optimizer)
+
+
+            best_mIoU = 0.0
+
+            for epoch in tqdm(range(self.epochs), desc="Training"):
+                self.model.train()
+                total_loss = 0
+                total_domain_loss = 0
+                total_semantic_loss = 0
+                
+                for _ in range(max(len(source_dataloader), len(target_dataloader))):
+                    # Source dataloader에서 데이터 가져오기
+                    try:
+                        source_data, source_labels = next(source_iter)
+                        source_data, source_labels = source_data.float().to(self.device), source_labels.long().to(self.device)
+                    except StopIteration:
+                        source_iter = iter(source_dataloader)
+                        source_data, source_labels = next(source_iter)
+                        source_data, source_labels = source_data.float().to(self.device), source_labels.long().to(self.device)
+                    
+                    # Target dataloader에서 데이터 가져오기
+                    try:
+                        target_data = next(target_iter)
+                        target_data = target_data.float().to(self.device)
+                    except StopIteration:
+                        target_iter = iter(target_dataloader)
+                        target_data = next(target_iter)
+                        target_data = target_data.float().to(self.device)
+
+                    # Training step
+                    semantic_loss, domain_loss, loss = self._train_step(self.model, source_data, source_labels, target_data, optimizer)
+                    total_loss += loss.item()
+                    total_domain_loss += domain_loss.item()
+                    total_semantic_loss += semantic_loss.item()
+
+                # Print training stats
+                if self.verbose and (epoch+1) % self.print_every == 0:
+                    avg_loss = total_loss / len(source_dataloader)
+                    avg_domain_loss = total_domain_loss / len(source_dataloader)
+                    avg_semantic_loss = total_semantic_loss / len(source_dataloader)
+                    print(f"Epoch [{epoch+1}/{self.epochs}], Average Loss: {avg_loss:.4f}, Domain Loss: {avg_domain_loss:.4f}, Semantic Loss: {avg_semantic_loss:.4f}")
+
+                    # Compute mIoU for source domain training data and validation data (if provided)
+                    train_mIoU = self._evaluate_segmentation_mIoU(self.model, source_dataloader)
+                    print(f"Epoch [{epoch+1}/{self.epochs}],Training mIoU: {train_mIoU:.4f}")
+
+                    # Validation and early stopping
+                    if val_dataloader:
+                        avg_val_loss, val_mIoU = self._valid_step(self.model, val_dataloader)
+                        print(f"Epoch [{epoch+1}/{self.epochs}], Valid Loss: {avg_val_loss:.4f},Validation mIoU: {val_mIoU:.4f}")
+                        
+                        # Save checkpoint if the current model has better performance
+                        if val_mIoU > best_mIoU:
+                            best_mIoU = val_mIoU
+                            if save_checkpoint_every and (epoch + 1) % save_checkpoint_every == 0:
+                                self._save_checkpoint(self.model, epoch, best_mIoU, self.checpoint_path)
+
+
+                    # Display segmentation results on training data
+                    monitor_training_process(source_dataloader, self.model, self.device, is_domain_classification=False)
+
+                    # Display domain classification results on target data
+                    monitor_training_process(target_dataloader, self.model, self.device, is_domain_classification=True)
+
+                # Update the learning rate if the scheduler is provided
+                if scheduler:
+                    scheduler.step()
+
+            return model
+
+    def _train_step(self, model, source_data, source_labels, target_data, optimizer):
+        # Forward pass for source domain
         model.train()
-        if multi_gpu_training:
-            model.freeze_bn()
-        print('Start epoch', epoch)
-        train_itr = iter(train_loader)
-        total_err = 0
-        total_acc = 0
-        inputs, labels = next(train_itr)
+        src_semantic_outputs, src_domain_outputs = model(source_data)
+        src_semantic_loss = self.criterion(src_semantic_outputs, source_labels)
+        src_domain_loss = F.binary_cross_entropy_with_logits(src_domain_outputs, torch.zeros_like(src_domain_outputs))
 
-        for idx, (inputs, labels) in enumerate(train_itr):
+        # Forward pass for target domain
+        _, tgt_domain_outputs = model(target_data, lamda=-1)  # Set lamda=-1 for gradient reversal
+        tgt_domain_loss = F.binary_cross_entropy_with_logits(tgt_domain_outputs, torch.ones_like(tgt_domain_outputs))
 
-            # compute
-            input_data = inputs.float().cuda()
-            labels = labels.cuda()
+        # Combine losses
+        domain_loss = src_domain_loss + tgt_domain_loss
+        loss = src_semantic_loss + domain_loss
 
-            # Use the model to produce the classification
-            if mixup_training:
-                input_data, labels = mixup_augmenter(input_data, labels)
-            grapheme_logits, vowel_logits, consonant_logits = model(input_data)
-
-            # Calling MultiHeadsEval forward function to produce evaluator results
-            if mixup_training:
-                eval_result = mixup_evaluator(grapheme_logits, vowel_logits, consonant_logits, labels)
-            else:
-                eval_result = evaluator(grapheme_logits, vowel_logits, consonant_logits, labels)
-            optimizer.zero_grad()
-            loss = eval_result['loss']
-
-
-            # ------ Uncomment if we use apex library --------
-            # if use_amp:
-            #     with amp.scale_loss(loss, optimizer) as scaled_loss:
-            #         scaled_loss.backward()
-
-            # get loss, back propagate, step
-            loss.backward()
-            max_grad = torch.max(parameters[-1].grad)
-            if not torch.isnan(max_grad):
-                optimizer.step()
-            else:
-                print('NAN in gradient, skip this step')
-                optimizer.zero_grad()
-
-            # tabulate the steps from the evaluation
-            eval_result = {k: eval_result[k].item() for k in eval_result}
-            
-            # Update Scheduler at this point only if scheduler_type is 'OneCycleLR'
-            if scheduler_type == 'OneCycleLR':
-                scheduler.step()
-            
-            if idx % 100 == 0:
-                t_time = time.time()
-                print(idx, eval_result['loss'], eval_result['acc'], t_time - s_time)
-                s_time = time.time()
-
-        ###############################
-        # Send images to Tensorboard 
-        # -- could also do this outside the loop with xb, yb = next(itr(DL))
-        ###############################
-
-        if epoch == 0: 
-            # Get the std and mean of each channel
-            std = torch.FloatTensor(cfg.DATASET.NORMALIZE_STD).view(3,1,1)
-            m = torch.FloatTensor(cfg.DATASET.NORMALIZE_MEAN).view(3,1,1)
-
-            # Un-normalize images, send mean and std to gpu for mixuped images
-            imgs, imgs_mixup = ((inputs*std)+m)*255, ((input_data*std.cuda())+m.cuda())*255
-            imgs, imgs_mixup = imgs.type(torch.uint8), imgs_mixup.type(torch.uint8)
-            img_grid = torchvision.utils.make_grid(imgs)
-            img_grid_mixup = torchvision.utils.make_grid(imgs_mixup)
-
-            img_grid = torchvision.utils.make_grid(imgs)
-            img_grid_mixup = torchvision.utils.make_grid(imgs_mixup)
-
-            writer_tensorboard.add_image("images no mixup", img_grid)
-            writer_tensorboard.add_image("images with mixup", img_grid_mixup)
-
-        ####################
-        # Training metrics
-        ####################
-        if mixup_training:
-            train_result = mixup_evaluator.evalulate_on_cache()
-            mixup_evaluator.clear_cache()
-        else:
-            train_result = evaluator.evalulate_on_cache()
-
-        # Store training loss, accuracy, kaggle score and write to Tensorboard    
-        train_total_err = train_result['loss']
-        writer_tensorboard.add_scalar('Loss/train', train_total_err, global_step=epoch)
-
-        train_total_acc = train_result['acc']
-        writer_tensorboard.add_scalar('Accuracy/train', train_total_acc, global_step=epoch)
-
-        train_kaggle_score = train_result['kaggle_score']
-        writer_tensorboard.add_scalar('Kaggle_Score/train', train_kaggle_score, global_step=epoch)
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
         
-        lr = optimizer.param_groups[-1]['lr']
-        
-        
-        print("Epoch {0} Training, Loss {1}, Acc {2}".format(epoch, train_total_err, train_total_acc))
-        evaluator.clear_cache()
+        return src_semantic_loss, domain_loss, loss
 
-        ###############################
-        # Compute validation error
-        ###############################
-
+    def _valid_step(self, model, val_dataloader):
         model.eval()
-        val_itr = iter(val_loader)
+        total_val_loss = 0.0
         with torch.no_grad():
-            for idx, (inputs, labels) in enumerate(val_itr):
-                input_data = inputs.float().cuda()
-                labels = labels.cuda()
-                grapheme_logits, vowel_logits, consonant_logits = model(input_data)
-                eval_result = evaluator(grapheme_logits, vowel_logits, consonant_logits, labels)
-                eval_result = {k: eval_result[k].item() for k in eval_result}
-                total_err += eval_result['loss']
-                total_acc += eval_result['acc']
+            for val_data, val_labels in val_dataloader:
+                val_data, val_labels = val_data.to(self.device), val_labels.to(self.device)
+                val_outputs, _ = model(val_data)
+                val_loss = nn.CrossEntropyLoss()(val_outputs['out'], val_labels)
+                total_val_loss += val_loss.item()
 
-        val_result = evaluator.evalulate_on_cache()
-        val_total_err = val_result['loss']
-        val_total_acc = val_result['acc']
-        val_kaggle_score = val_result['kaggle_score']
+        avg_val_loss = total_val_loss / len(val_dataloader) if val_dataloader else 0.0
+        # Compute mIoU
+        _, predictions = torch.max(val_outputs, 1)
+        mIoU = self._evaluate_segmentation_mIoU(model, val_dataloader)
 
-        print("Epoch {0} Eval, Loss {1}, Acc {2}".format(epoch, val_total_err, val_total_acc))
-        evaluator.clear_cache()
+        return avg_val_loss, mIoU
 
-        # Update scheudler here if not 'OneCycleLR'
-        if scheduler is not None and scheduler != 'OneCycleLR':
-            if scheduler_type == 'reduce_on_plateau':
-                scheduler.step(val_total_err)
-            else:
-                scheduler.step()
+    def _evaluate_segmentation_mIoU(self, model, dataloader):
+        model.eval()
+        total_mIoU = 0
 
+        with torch.no_grad():
+            for images, labels in dataloader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                outputs, _ = model(images)
+                _, preds = torch.max(outputs, 1)
+                mIoU = compute_mIoU(preds, labels)
+                total_mIoU += mIoU
 
-        ######################################
-        # Saving the model + performance
-        ######################################
+        return total_mIoU / len(dataloader)
+    
+    def _save_checkpoint(self, model, epoch, best_mIoU, filename):
+        """
+        Save the model checkpoint.
 
-        print("Saving the model (epoch %d)" % epoch)
-        save_state = {
-            "epoch": epoch + 1,
-            "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-        }
-        if scheduler is not None:
-            save_state['scheduler_state'] = scheduler.state_dict()
-
-        # ------ Uncomment if we use apex library --------
-        # if use_amp:
-        #     save_state['amp_state'] = amp.state_dict()
-        torch.save(save_state, state_fpath)
-
-        print("Making a backup (step %d)" % epoch)
-        backup_fpath = os.path.join(backup_dir, "model_bak_%06d.pt" % (epoch,))
-        torch.save(save_state, backup_fpath)
-
-        # Dump the traces
-        perf_trace.append(
-            {
-                'epoch': epoch,
-                'train_err': train_total_err,
-                'train_acc': train_total_acc,
-                'train_kaggle_score': train_kaggle_score,
-                'val_err': val_total_err,
-                'val_acc': val_total_acc,
-                'val_kaggle_score': val_kaggle_score
-            }
-        )
-        pickle.dump(perf_trace, open(perf_path, 'wb'))
-
-        # store epoch full result separately
-        epoch_result = {
+        Args:
+            model (nn.Module): The DANN model to save.
+            epoch (int): Current epoch.
+            best_mIoU (float): Best mIoU score so far.
+            filename (str): Name of the file to save the checkpoint.
+        """
+        checkpoint = {
             'epoch': epoch,
-            'train_result': train_result,
-            'val_result': val_result
+            'model_state_dict': model.state_dict(),
+            'best_mIoU': best_mIoU
         }
-        pickle.dump(epoch_result, open(os.path.join(results_dir, 'result_epoch_{0}.p'.format(epoch)), 'wb'))
-
-        # output_path_base = os.path.basename(output_path)
-        # os.system('aws s3 sync /root/bengali_data/{0} s3://eaitest1/{1}'.format(output_path_base, output_path_base))
-        # os.system('rm -r /root/bengali_data/{0}/model_backups'.format(output_path_base))
-        # os.system('mkdir /root/bengali_data/{0}/model_backups'.format(output_path_base))
-
-        
-        # Add model to Tensorboard to inspect the details of the architecture
-        writer_tensorboard.add_graph(model, input_data)
-        writer_tensorboard.close()
+        torch.save(checkpoint, filename)
+        print(f"Checkpoint saved to {filename} at epoch {epoch} with mIoU {best_mIoU:.4f}.")
 
 
-if __name__ == '__main__':
+    def load_checkpoint(self, model, filename):
+        """
+        Load the model checkpoint.
 
-    arguments = docopt(__doc__, argv=None, help=True, version=None, options_first=False)
-    output_path = arguments['-path_output']
-    data_path = arguments['--path_cfg_data']
-    cfg_path = arguments['--path_cfg_override']
-    cfg = get_cfg_defaults()
-    cfg.merge_from_file(cfg_path)
-    if cfg_path is not None:
-        cfg.merge_from_file(cfg_path)
-    cfg.OUTPUT_PATH = output_path
-    train(cfg)
+        Args:
+            model (nn.Module): The DANN model to load.
+            filename (str): Name of the checkpoint file to load.
+
+        Returns:
+            epoch (int): Epoch of the loaded checkpoint.
+            best_mIoU (float): Best mIoU of the loaded checkpoint.
+        """
+        checkpoint = torch.load(filename)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Checkpoint loaded from {filename} at epoch {checkpoint['epoch']} with mIoU {checkpoint['best_mIoU']:.4f}.")
+        return checkpoint['epoch'], checkpoint['best_mIoU']
+    
+    def _initialize_optimizer(self, parameters) -> torch.optim.Optimizer:
+        """
+        Initialize the optimizer based on user's choice and parameters.
+
+        Args:
+            parameters: Parameters of the model.
+
+        Returns:
+            Initialized optimizer.
+        """
+        optimizer_choices = {
+            'Adam': Adam(filter(lambda p: p.requires_grad, parameters), lr=self.learning_rate, weight_decay=self.weight_decay, **self.optimizer_params),
+            'AdamW': AdamW(filter(lambda p: p.requires_grad, parameters), lr=self.learning_rate, weight_decay=self.weight_decay, **self.optimizer_params),
+            'SGD': SGD(filter(lambda p: p.requires_grad, parameters), lr=self.learning_rate, weight_decay=self.weight_decay, **self.optimizer_params)
+        }
+        return optimizer_choices[self.optimizer_choice]
+
+    def _initialize_scheduler(self, optimizer):
+        scheduler_choices = {
+            'StepLR': StepLR(optimizer, step_size=200, gamma=0.5),
+            'ExponentialLR': ExponentialLR(optimizer, gamma=0.95),
+            'OneCycleLR': OneCycleLR(optimizer, max_lr=1e-2, total_steps=self.epochs * self.batch_size, 
+                       div_factor=25, pct_start=0.3, anneal_strategy='cos')
+        }
+        return scheduler_choices[self.scheduler_choice]
+
+    
